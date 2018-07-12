@@ -1,9 +1,4 @@
-<!DOCTYPE html>
-<html lang="en">
-	<head>
-		<meta content="text/html;charset=utf-8" http-equiv="Content-Type">
-		<meta content="utf-8" http-equiv="encoding">
-        <style type="text/css">
+       <style type="text/css">
             body {
                 margin: 0;
                 overflow: hidden;
@@ -16,10 +11,10 @@
 		<script src="lib/stats.min.js"></script>
 		<script src="lib/dat.gui.min.js"></script>
 		<script src="lib/tween.min.js"></script>
-        <script src="lib/utilities.js"></script>
+        	<script src="lib/utilities.js"></script>
 		<script src="js/Mirror.js"></script>
 		<script src="js/WaterShader.js"></script>
-        <script src="fonts/helvetiker_regular.typeface.js"></script>
+        	<script src="fonts/helvetiker_regular.typeface.js"></script>
 		<script type="text/javascript">
 		function getParameterByName(name) {
 			var match = RegExp('[?&]' + name + '=([^&]*)')
@@ -38,9 +33,3 @@
 		    }
         }
 		</script>
-	</head>
-	<body onload="init()">
-        <div id="container">
-        </div>
-	</body>
-</html>
