@@ -1,4 +1,9 @@
-       <style type="text/css">
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta content="text/html;charset=utf-8" http-equiv="Content-Type">
+		<meta content="utf-8" http-equiv="encoding">
+        <style type="text/css">
             body {
                 margin: 0;
                 overflow: hidden;
@@ -20,7 +25,7 @@
 			var match = RegExp('[?&]' + name + '=([^&]*)')
 							.exec(window.location.search);
 			//return match && decodeURIComponent(match[1].replace(/\+/g, ' '));
-			return "Project Hugo Elias.js";
+			return "Project Hugo Elias.JS";
         }
         function init() {
 		    var loadScript = getParameterByName('load');
@@ -33,3 +38,9 @@
 		    }
         }
 		</script>
+	</head>
+	<body onload="init()">
+        <div id="container">
+        </div>
+	</body>
+</html>
