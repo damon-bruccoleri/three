@@ -20,7 +20,7 @@
 		<script src="js/Mirror.js"></script>
 		<script src="js/WaterShader.js"></script>
         	<script src="fonts/helvetiker_regular.typeface.js"></script>
-		<script type="text/javascript">
+		<script type="text/javascript"></script>
 		function getParameterByName(name) {
 			var match = RegExp('[?&]' + name + '=([^&]*)')
 							.exec(window.location.search);
@@ -37,7 +37,7 @@
 			    document.getElementsByTagName('head')[0].appendChild(thescript);
 		    }
         }
-		</script>
+		
 	</head>
 	<body onload="init()">
         <div id="container">
