@@ -24,6 +24,14 @@ var timerID;
 var spec = new THREE.Color();
 var emissive = new THREE.Color();
 
+/** Fixed-timestep simulation (seconds per substep). ~1/60 matches one step per frame at 60fps. */
+var FIXED_DT = 1 / 60;
+var MAX_SUBSTEPS = 8;
+var simAccumulator = 0;
+
+/** Recompute full normals every N frames while vertices move. */
+var NORMALS_UPDATE_INTERVAL = 2;
+var normalsFrameAcc = 0;
 
 function Controls() {
     this.shininess = 100;
@@ -33,20 +41,57 @@ function Controls() {
 	this.metal = false;
 	this.wireframe = false;
 	this.One_Hz = false;
+	/** Gaussian impulse: radius in grid cells (integer-ish). */
+	this.impulseRadius = 7;
+	/** Peak impulse magnitude (depression depth). */
+	this.impulseStrength = 3;
+	/** Per-step amplitude damping (original used ~1/32 ≈ 0.03125). */
+	this.heightDamping = 1 / 32;
+	/** Damping proportional to vertex velocity (prev1 − prev2). */
+	this.velocityDamping = 0.02;
+	/** Extra damping near mesh edges (0 = none, ~0.1 = softer reflections). */
+	this.edgeAbsorption = 0.08;
+	/** Width in cells over which edge absorption ramps. */
+	this.edgeMargin = 5;
+}
+
+function syncMaterialFromControls() {
+	if (!mat) return;
+	mat.shininess = controls.shininess;
+	spec.set(controls.specular);
+	emissive.set(controls.emissive);
+	mat.metal = controls.metal;
+	mat.wireframe = controls.wireframe;
+	mat.needsUpdate = true;
 }
 
 function initGui() {
     gui = new dat.GUI();
     controls = new Controls();
-    gui.add(controls, 'shininess', 0, 100).step(5);
-    gui.addColor(controls, 'specular');
-	gui.addColor(controls,'emissive');
+    gui.add(controls, 'shininess', 0, 100).step(5).onChange(syncMaterialFromControls);
+    gui.addColor(controls, 'specular').onChange(syncMaterialFromControls);
+	gui.addColor(controls,'emissive').onChange(syncMaterialFromControls);
 	gui.add(controls,'moon_y', 0, 100).step(1);
-	gui.add(controls,'metal');
-	gui.add(controls,'wireframe');
+	gui.add(controls,'metal').onChange(syncMaterialFromControls);
+	gui.add(controls,'wireframe').onChange(syncMaterialFromControls);
+	var sim = gui.addFolder('Wave simulation');
+	sim.add(controls, 'impulseRadius', 2, 16).step(1);
+	sim.add(controls, 'impulseStrength', 0.5, 8).step(0.25);
+	sim.add(controls, 'heightDamping', 0, 0.15).step(0.005);
+	sim.add(controls, 'velocityDamping', 0, 0.15).step(0.005);
+	sim.add(controls, 'edgeAbsorption', 0, 0.35).step(0.01);
+	sim.add(controls, 'edgeMargin', 2, 12).step(1);
+	sim.open();
 	var isOne_Hz = gui.add(controls,'One_Hz');
-	isOne_Hz.onChange(function(value){ if(value==true) timerID = setInterval(updateSquares,frame_period) 
-											else clearInterval(timerID);});
+	isOne_Hz.onChange(function(value){
+		if (value === true) {
+			timerID = setInterval(function () {
+				updateSquares(1 / 60);
+			}, frame_period);
+		} else {
+			clearInterval(timerID);
+		}
+	});
 } 
 
 function createMatrix(m, n) {
@@ -54,10 +99,10 @@ function createMatrix(m, n) {
 
     prev1_squares = new Array(m);
     prev2_squares = new Array(m);
-	for ( i=0; i<m; i++){
+	for (var i = 0; i < m; i++){
         prev1_squares[i] = new Array(n);
         prev2_squares[i] = new Array(n);
-		for ( j=0; j<n; j++){
+		for (var j = 0; j < n; j++){
 			prev1_squares[i][j] =0;
 			prev2_squares[i][j] =0;
 		}
@@ -96,50 +141,102 @@ function createMatrix(m, n) {
 	scene.add( sedge2 );
 }
 
-function updateSquares(delta) {
-	if( !touchProcessed ){
-		var a_vertex_index = geom.faces[theSelectedFace3].a;
-		var b_vertex_index = geom.faces[theSelectedFace3].b;
-		var c_vertex_index = geom.faces[theSelectedFace3].c;
-		geom.vertices[a_vertex_index].z = -5;
-		prev1_squares[a_vertex_index%width][Math.round(a_vertex_index/width)] = -5;	
-		prev2_squares[a_vertex_index%width][Math.round(a_vertex_index/width)] = -5;	
-		geom.vertices[c_vertex_index].z = -5;
-		prev1_squares[c_vertex_index%width][Math.round(c_vertex_index/width)] = -5;	
-		prev2_squares[c_vertex_index%width][Math.round(c_vertex_index/width)] = -5;	
-		geom.vertices[b_vertex_index].z = -5;
-		prev1_squares[b_vertex_index%width][Math.round(b_vertex_index/width)] = -5;	
-		prev2_squares[b_vertex_index%width][Math.round(b_vertex_index/width)] = -5;	
-		touchProcessed=true;
-		//audio.play();
+function vertexIndexToGrid(idx) {
+	return { j: idx % width, i: Math.floor(idx / width) };
+}
+
+/** Soft Gaussian impulse around the face center (more natural than three sharp peaks). */
+function applySoftImpulse(faceIndex) {
+	var face = geom.faces[faceIndex];
+	var a = vertexIndexToGrid(face.a);
+	var b = vertexIndexToGrid(face.b);
+	var c = vertexIndexToGrid(face.c);
+	var jc = Math.round((a.j + b.j + c.j) / 3);
+	var ic = Math.round((a.i + b.i + c.i) / 3);
+	var R = Math.max(2, Math.round(controls.impulseRadius));
+	var peak = -Math.abs(controls.impulseStrength);
+	var sigma = Math.max(0.8, R / 2.2);
+	var sigma2 = 2 * sigma * sigma;
+
+	for (var di = -R; di <= R; di++) {
+		for (var dj = -R; dj <= R; dj++) {
+			var ii = ic + di;
+			var jj = jc + dj;
+			if (ii < 1 || ii >= depth - 1 || jj < 1 || jj >= width - 1) continue;
+			var dist2 = di * di + dj * dj;
+			var amp = peak * Math.exp(-dist2 / sigma2);
+			if (Math.abs(amp) < 1e-6) continue;
+			var vi = ii * width + jj;
+			geom.vertices[vi].z += amp;
+			prev1_squares[jj][ii] += amp;
+			prev2_squares[jj][ii] += amp;
+		}
 	}
-	
-	for (var i = 1; i < depth-1 ; i++)
-		for( var j = 1; j<width-1 ; j++){
-			var y  = ( prev1_squares[j][i-1] + 
-						prev1_squares[j][i+1] + 
-						prev1_squares[j-1][i] +
-						prev1_squares[j+1][i])/2;
+}
+
+function edgeDampFactor(i, j) {
+	var margin = Math.max(2, Math.round(controls.edgeMargin));
+	var d = Math.min(i, depth - 1 - i, j, width - 1 - j);
+	var abs = controls.edgeAbsorption;
+	if (abs <= 0 || d >= margin) return 1;
+	// 1 at inner region; slightly <1 near edges
+	var t = d / margin;
+	return 1 - abs * (1 - t);
+}
+
+/** One discrete wave step (Hugo Elias–style) with tunable damping. */
+function waveSimulationStep() {
+	var hd = controls.heightDamping;
+	var vd = controls.velocityDamping;
+	for (var i = 1; i < depth - 1; i++) {
+		for (var j = 1; j < width - 1; j++) {
+			var y = (prev1_squares[j][i - 1] +
+				prev1_squares[j][i + 1] +
+				prev1_squares[j - 1][i] +
+				prev1_squares[j + 1][i]) / 2;
 			y -= prev2_squares[j][i];
-			geom.vertices[i*width+j].z  = y-y/32;	
+			var vel = prev1_squares[j][i] - prev2_squares[j][i];
+			var z = y - hd * y - vd * vel;
+			z *= edgeDampFactor(i, j);
+			geom.vertices[i * width + j].z = z;
 		}
-	for (var i = 1; i < depth-1 ; i++)
-		for( var j = 1; j<width-1 ; j++){
-			prev2_squares[j][i] = prev1_squares[j][i];  //shift time
-			prev1_squares[j][i] = geom.vertices[i*width+j].z;
+	}
+	for (var i2 = 1; i2 < depth - 1; i2++) {
+		for (var j2 = 1; j2 < width - 1; j2++) {
+			prev2_squares[j2][i2] = prev1_squares[j2][i2];
+			prev1_squares[j2][i2] = geom.vertices[i2 * width + j2].z;
 		}
-	mat.shininess = controls.shininess;
-	spec.set(controls.specular);
-	emissive.set(controls.emissive);
-	mat.metal = controls.metal;
-	mat.wireframe = controls.wireframe;
-	mat.needsUpdate = true;
-	moon.position.set(0,controls.moon_y,-100);
+	}
+}
+
+function updateSquares(delta) {
+	var dt = (delta !== undefined && delta > 0) ? delta : 1 / 60;
+
+	if (!touchProcessed) {
+		applySoftImpulse(theSelectedFace3);
+		touchProcessed = true;
+	}
+
+	simAccumulator += dt;
+	var steps = 0;
+	while (simAccumulator >= FIXED_DT && steps < MAX_SUBSTEPS) {
+		waveSimulationStep();
+		simAccumulator -= FIXED_DT;
+		steps++;
+	}
+
+	moon.position.set(0, controls.moon_y, -100);
 	directionalLight.position.set(0, controls.moon_y, -200).normalize();
-	geom.computeFaceNormals();
-	geom.computeVertexNormals();
-	geom.verticesNeedUpdate=true;
-	geom.normalsNeedUpdate = true;
+
+	normalsFrameAcc++;
+	if (normalsFrameAcc % NORMALS_UPDATE_INTERVAL === 0) {
+		geom.computeFaceNormals();
+		geom.computeVertexNormals();
+		geom.normalsNeedUpdate = true;
+	} else {
+		geom.normalsNeedUpdate = false;
+	}
+	geom.verticesNeedUpdate = true;
 }
 
 function createScene() {
@@ -184,8 +281,9 @@ function animate() {
 function render() {
     var delta = clock.getDelta();
 
-	if(controls.One_Hz==false)
-		updateSquares();
+	if (controls.One_Hz === false) {
+		updateSquares(delta);
+	}
     cameraControls.update(delta);
     renderer.render(scene, camera);
 }
@@ -235,5 +333,4 @@ function addToDOM() {
     addToDOM();
     render();
     animate();
-
 
