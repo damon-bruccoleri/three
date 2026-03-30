@@ -28,6 +28,7 @@ var emissive = new THREE.Color();
 var FIXED_DT = 1 / 60;
 var MAX_SUBSTEPS = 8;
 var simAccumulator = 0;
+var MAX_ABS_HEIGHT = 20;
 
 /** Recompute full normals every N frames while vertices move. */
 var NORMALS_UPDATE_INTERVAL = 2;
@@ -195,9 +196,14 @@ function waveSimulationStep() {
 				prev1_squares[j - 1][i] +
 				prev1_squares[j + 1][i]) / 2;
 			y -= prev2_squares[j][i];
-			var vel = prev1_squares[j][i] - prev2_squares[j][i];
-			var z = y - hd * y - vd * vel;
+			var z = y * (1 - hd);
+			// Blend toward previous state for extra damping without injecting energy.
+			if (vd > 0) {
+				z = z * (1 - vd) + prev1_squares[j][i] * vd;
+			}
 			z *= edgeDampFactor(i, j);
+			if (z > MAX_ABS_HEIGHT) z = MAX_ABS_HEIGHT;
+			if (z < -MAX_ABS_HEIGHT) z = -MAX_ABS_HEIGHT;
 			geom.vertices[i * width + j].z = z;
 		}
 	}
