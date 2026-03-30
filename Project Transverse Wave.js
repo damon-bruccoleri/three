@@ -26,7 +26,11 @@ var touchedVertex={
 		touched : false};
 var spec = new THREE.Color();
 var emissive = new THREE.Color();
-		
+
+/** Recompute full normals every N frames while vertices move (suggestion 1). */
+var NORMALS_UPDATE_INTERVAL = 2;
+var normalsFrameAcc = 0;
+
 function Controls() {
     this.shininess = 100;
     this.specular = '#000000';
@@ -36,15 +40,25 @@ function Controls() {
 	this.wireframe = false;
 }
 
+function syncMaterialFromControls() {
+	if (!mat) return;
+	mat.shininess = controls.shininess;
+	spec.set(controls.specular);
+	emissive.set(controls.emissive);
+	mat.metal = controls.metal;
+	mat.wireframe = controls.wireframe;
+	mat.needsUpdate = true;
+}
+
 function initGui() {
     gui = new dat.GUI();
     controls = new Controls();
-    gui.add(controls, 'shininess', 0, 100).step(5);
-    gui.addColor(controls, 'specular');
-	gui.addColor(controls,'emissive');
+    gui.add(controls, 'shininess', 0, 100).step(5).onChange(syncMaterialFromControls);
+    gui.addColor(controls, 'specular').onChange(syncMaterialFromControls);
+	gui.addColor(controls,'emissive').onChange(syncMaterialFromControls);
 	gui.add(controls,'moon_y', 0, 100).step(1);
-	gui.add(controls,'metal');
-	gui.add(controls,'wireframe');
+	gui.add(controls,'metal').onChange(syncMaterialFromControls);
+	gui.add(controls,'wireframe').onChange(syncMaterialFromControls);
 } 
 
 function createMatrix(m, n) {
@@ -90,13 +104,6 @@ var lambda = 8; // wavelength
 var c = 7; // wave speed
 var PI2 = 2*Math.PI;
 
-function heightFunction(d, t) {
-	if(d < (c*t+lambda/4)) // create wavefront
-        return A * Math.exp(-t/tc-d/dc)* Math.cos(PI2/lambda*(d - c*t)); // traveling wave
-	else
-		return 0;
-}
-
 function updateSquares(deltat) {
 	if( !touchProcessed ){
 		var a_vertex_index = geom.faces[theSelectedFace3].a;
@@ -109,32 +116,57 @@ function updateSquares(deltat) {
 		audio.play();
 	}
 	
+	var didUpdateVertices = false;
 	if(touchedVertex.touched){
 		touchedVertex.time += deltat;
 		if(touchedVertex.time> 10*tc) // looks to go to 0 after 10 time constants
 			touchedVertex.touched = false;
-		for (var i = 1; i < depth-1 ; i++)
-			for( var j = 1; j<width-1 ; j++){
-				if(!touchedVertex.touched){ // looks to go to 0 after 10 time constants
-					geom.vertices[i*width+j].z = 0;
-				}else{
-					dist = Math.sqrt(Math.pow(touchedVertex.x-j,2)+Math.pow(touchedVertex.y-i,2));
-					geom.vertices[i*width+j].z  = heightFunction(dist,touchedVertex.time);
+
+		var t = touchedVertex.time;
+		var expNegT = Math.exp(-t / tc);
+		var wf = c * t + lambda * 0.25;
+		var wf2 = wf * wf;
+		var k = PI2 / lambda;
+		var ct = c * t;
+		var vx = touchedVertex.x;
+		var vy = touchedVertex.y;
+		var verts = geom.vertices;
+
+		for (var i = 1; i < depth-1 ; i++) {
+			var rowBase = i * width;
+			for (var j = 1; j < width-1 ; j++) {
+				if (!touchedVertex.touched) {
+					verts[rowBase + j].z = 0;
+				} else {
+					var dx = vx - j;
+					var dy = vy - i;
+					var d2 = dx * dx + dy * dy;
+					if (d2 >= wf2) {
+						verts[rowBase + j].z = 0;
+					} else {
+						var d = Math.sqrt(d2);
+						verts[rowBase + j].z = A * expNegT * Math.exp(-d / dc) * Math.cos(k * (d - ct));
+					}
 				}
 			}
+		}
+		didUpdateVertices = true;
 	}
-	mat.shininess = controls.shininess;
-	spec.set(controls.specular);
-	emissive.set(controls.emissive);
-	mat.metal = controls.metal;
-	mat.wireframe = controls.wireframe;
-	mat.needsUpdate = true;
+
 	moon.position.set(0,controls.moon_y,-100);
 	directionalLight.position.set(0, controls.moon_y, -200).normalize();
-	geom.computeFaceNormals();
-	geom.computeVertexNormals();
-	geom.verticesNeedUpdate=true;
-	geom.normalsNeedUpdate = true;
+
+	if (didUpdateVertices) {
+		geom.verticesNeedUpdate = true;
+		normalsFrameAcc++;
+		if (normalsFrameAcc % NORMALS_UPDATE_INTERVAL === 0) {
+			geom.computeFaceNormals();
+			geom.computeVertexNormals();
+			geom.normalsNeedUpdate = true;
+		} else {
+			geom.normalsNeedUpdate = false;
+		}
+	}
 }
 
 function createScene() {
